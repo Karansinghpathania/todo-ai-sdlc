@@ -1,332 +1,124 @@
-# Implementation Plan
+# Implementation Plan: Epic KAN-1
 
-## 1. Overview (epic key, goal, scope, out of scope)
+## 1. Overview
 
-**Epic:** KAN-1 — Improve task lifecycle UX (edit, validate, filter/clear) and add created_at with idempotent migration
-
-**Goal**
-Enhance the existing Todo app so users can:
-- edit task titles,
-- have title max-length validation enforced by the API (with negative tests),
-- filter tasks (all/active/completed) and clear completed tasks,
-- and store a `created_at` timestamp for tasks via an idempotent SQLite migration.
-
-**Scope (repo-grounded)**
-- Backend changes in `backend/main.py` (FastAPI routes + SQLite access + startup DB initialization/migration).
-- Frontend changes in `frontend/app.js` (edit UI, filter UI, clear-completed UI; without modifying `frontend/index.html`).
-- Test changes in `tests/test_api.py` (pytest + FastAPI TestClient).
-
-**Out of scope**
-- Any fixes to `frontend/index.html` (explicitly excluded).
-- Introducing external migration tools/frameworks (e.g., Alembic).
-- Changing database engine away from SQLite.
-- AuthN/AuthZ.
-
----
+- **Epic:** KAN-1 - Improve task lifecycle UX (edit, validate, filter/clear) and add created_at with idempotent migration
+- **Goal:** Let users edit task titles, enforce one title limit of 100 characters in backend and frontend, filter tasks (all/active/completed) and clear completed tasks, and store a `created_at` timestamp through an idempotent SQLite migration.
+- **Stories:** KAN-2 (created_at + migration), KAN-3 (title length validation), KAN-4 (edit title), KAN-5 (filter + clear completed)
+- **In scope:**
+  - Backend: `backend/main.py`, new `backend/migrations.py`
+  - Frontend: `frontend/app.js`; minimal edits to `frontend/index.html` (change the title input `maxlength` from 200 to 100, add controls or test hooks if needed)
+  - Tests: `tests/test_api.py` (pytest), Gherkin features and Playwright end-to-end tests (written in the QA phase)
+- **Out of scope:** new application frameworks, external migration tools, changing the database engine, authentication, repairing `frontend/index.html` (it is not broken; the code index only shows its text).
 
 ## 2. Story-by-story plan
 
-### Story KAN-2 — Add created_at column to tasks with an idempotent SQLite migration
+### Shared rules (apply to every story)
 
-**Objective**
-Add a `created_at` column to the `tasks` table without breaking existing databases, and ensure startup migration is idempotent. New tasks must return `created_at` in API responses.
+- Title limit is **100 characters, measured after trimming**, for create and edit, in backend and frontend.
+- Exact messages (copy from the Jira acceptance criteria; verify against KAN-3 and KAN-4 before coding):
+  - blank title: 422, `"Title is required"`
+  - too long: 422, `"Title must be 100 characters or less"`
+  - missing task: 404, `"Task not found"`
+- `created_at` uses `datetime.now(timezone.utc).isoformat()` for both backfill and new inserts.
+- Every new interactive UI element gets a stable `data-testid` attribute (names are fixed in the LLD).
+- Existing endpoints and JSON fields stay backward compatible; new fields and query parameters are additive and optional.
 
-**Files to change / create (real paths)**
-- Change: `backend/main.py`
-- Change: `tests/test_api.py`
+### KAN-2: created_at column with an idempotent migration
 
-**Implementation steps (ordered)**
-1. **Define a stable timestamp format** in `backend/main.py` for `created_at`:
-   - Use UTC ISO-8601 string: `datetime.now(timezone.utc).isoformat()`, stored as `TEXT` in SQLite.
-2. **Add an idempotent migration step inside `init_db()`** in `backend/main.py`:
-   - Keep the existing `CREATE TABLE IF NOT EXISTS tasks (...)` for first-run DB creation.
-   - After table creation, check for `created_at` presence using:
-     - `PRAGMA table_info(tasks)` and scan returned column names.
-   - If missing, run `ALTER TABLE tasks ADD COLUMN created_at TEXT`.
-   - Backfill existing rows where `created_at IS NULL` with a non-empty value (set to the migration-time timestamp).
-   - Ensure running this logic repeatedly does not error and does not drop data.
-3. **Update insert logic** in `create_task()` (`backend/main.py`):
-   - Insert `created_at` on task creation (include it in the `INSERT` statement).
-4. **Update API response mapping** in `row_to_dict()` (`backend/main.py`):
-   - Include `created_at` key in returned dict.
-   - Keep backwards compatibility in behavior (existing keys unchanged); adding a new field is additive.
-5. **Update tests** in `tests/test_api.py`:
-   - Add/extend tests to cover old-schema migration, backfill, API response, and idempotency:
-     - **Old-schema DB migration + backfill:** create an on-disk SQLite DB with a `tasks` table that intentionally lacks `created_at`, insert at least one row with minimal columns, then start the app/init code against that DB and assert:
-       - `PRAGMA table_info(tasks)` includes `created_at`
-       - existing rows now have non-empty `created_at` (backfilled)
-     - **API response includes created_at:** POST then GET/list returns `created_at` as a non-empty string.
-     - **Second-run idempotency:** call `backend.main.init_db()` explicitly a second time and assert it does not raise and the API continues to operate (e.g., list still returns tasks and each has `created_at`).
+- **Objective:** add `created_at` to `tasks`, upgrade existing databases without data loss, safe to run repeatedly.
+- **Files:** CREATE `backend/migrations.py`; UPDATE `backend/main.py`; UPDATE `tests/test_api.py`.
+- **Steps:**
+  1. Create `backend/migrations.py` with `migrate_sqlite_schema(conn)`.
+  2. In it, read `PRAGMA table_info(tasks)`. If `created_at` is missing: `ALTER TABLE tasks ADD COLUMN created_at TEXT` (no default, because SQLite rejects non-constant defaults on ADD COLUMN), then `UPDATE tasks SET created_at = ? WHERE created_at IS NULL` with one timestamp generated in Python.
+  3. In `backend/main.py`, keep `CREATE TABLE IF NOT EXISTS`, then call `migrate_sqlite_schema(conn)` from `init_db()`.
+  4. Set `created_at` explicitly in the `INSERT` inside `create_task()`; include `created_at` in `row_to_dict()`.
+- **Tests:**
+  - POST and GET responses include a non-empty `created_at`.
+  - **Upgrade test:** create a temporary SQLite file with the old schema (`id`, `title`, `completed`) and at least one row; call `migrate_sqlite_schema` on it; assert the column exists and the existing row has a non-null `created_at`; call it a second time and assert no error and unchanged values.
+  - Calling `init_db()` again on the test database raises no error.
+- **Acceptance criteria:** existing database upgraded without data loss; migration idempotent; `created_at` returned on create and list.
+- **Effort:** M
 
-**Mapping to acceptance criteria**
-- AC1 (existing DB gets new column without data loss): covered by migration logic in `init_db()` using PRAGMA + ALTER + backfill + old-schema test.
-- AC2 (idempotent): covered by PRAGMA guard + explicit second `init_db()` call in test.
-- AC3 (POST then GET returns created_at): covered by updated insert + `row_to_dict()` + API tests.
+### KAN-3: title length validation
 
-**Effort:** M (schema + migration logic + tests)
+- **Objective:** one validation rule, used for create now and edit later.
+- **Files:** UPDATE `backend/main.py`, `frontend/app.js`, `frontend/index.html`, `tests/test_api.py`.
+- **Steps:**
+  1. Backend: add `validate_title(raw)` that trims, raises 422 `"Title is required"` when empty, raises 422 `"Title must be 100 characters or less"` when longer than 100, and returns the trimmed title. Use it in `create_task()`.
+  2. Frontend: change the title input `maxlength` from 200 to 100 in `frontend/index.html`. In `frontend/app.js`, check trimmed length before the POST, show the same message in the error element, and send no request when it fails. The same check is reused by the edit handler in KAN-4.
+- **Tests (pytest):** 200-character title returns 422 with the exact message; exactly 100 characters returns 201; blank title still returns 422 and the test asserts the detail `"Title is required"`.
+- **UI criteria** (maxlength, client-side error) are covered by Playwright in the QA phase.
+- **Effort:** S
 
----
+### KAN-4: edit task title
 
-### Story KAN-3 — Enforce maximum title length validation on create (and later reuse for edit) with negative tests
+- **Objective:** edit an existing task's title through the API and an inline UI, reusing `validate_title`.
+- **Files:** UPDATE `backend/main.py`, `frontend/app.js`, `tests/test_api.py`.
+- **Steps:**
+  1. Backend: `PATCH /api/tasks/{task_id}` with body `{"title": ...}`; call `validate_title`; `UPDATE tasks SET title = ? WHERE id = ?`; if no row changed return 404 `"Task not found"`; return the updated row. The existing `PATCH /api/tasks/{task_id}/toggle` must keep working.
+  2. Frontend: in `render(tasks)`, add an Edit button per task, created dynamically with a `data-testid`. Clicking it swaps the title text for an input with Save and Cancel buttons. Save validates with the shared client-side check, calls the PATCH, and reloads. Cancel restores the list without any request.
+- **Tests (pytest):** success (200, new title); missing id (404); blank title (422 `"Title is required"`); 200-character title (422, same message as create); toggle endpoint still passes.
+- **UI criterion** (inline edit shows the updated title) is covered by Playwright in the QA phase.
+- **Effort:** M
 
-**Objective**
-Enforce a maximum title length (per story AC: 100 chars) in the API, returning HTTP 422 and an explicit Jira-defined message for too-long titles, plus add negative/boundary tests.
+### KAN-5: filter and clear completed
 
-**Files to change / create (real paths)**
-- Change: `backend/main.py`
-- Change: `tests/test_api.py`
+- **Objective:** filter by completion state and remove completed tasks.
+- **Files:** UPDATE `backend/main.py`, `frontend/app.js`, `tests/test_api.py`; `frontend/index.html` only if static markup is preferred over dynamic controls.
+- **Steps:**
+  1. Backend, route order is critical: declare `DELETE /api/tasks/completed` **before** `DELETE /api/tasks/{task_id}`. Otherwise FastAPI treats `completed` as a task id and returns 422.
+  2. `GET /api/tasks` accepts an optional `filter` query parameter (`all`, `active`, `completed`; default `all`). An invalid value returns 422 with detail `"Filter must be all, active or completed"` (decided here because the Jira criteria do not define it). A request without the parameter returns every task, as today.
+  3. `DELETE /api/tasks/completed` runs `DELETE FROM tasks WHERE completed = 1` and always returns 204.
+  4. Frontend: All / Active / Completed controls and a Clear completed button, each with a `data-testid`. Keep a `currentFilter` variable; `load()` requests `/api/tasks?filter=<value>` for active and completed, and plain `/api/tasks` for all.
+- **Tests (pytest):** create several tasks and complete some; `filter=active` returns only incomplete tasks; `filter=completed` returns only completed tasks; an invalid filter returns 422; `DELETE /api/tasks/completed` returns 204 and the completed filter is then empty; deleting a single task by id still works.
+- **UI criteria** (filter controls, Clear completed) are covered by Playwright in the QA phase.
+- **Effort:** M
 
-**Implementation steps (ordered)**
-1. **Choose a single validation function** in `backend/main.py` to keep create/edit consistent:
-   - Implement helper (local function) like `validate_title(raw: str) -> str`:
-     - `title = raw.strip()`
-     - if empty: raise `HTTPException(422, "<JIRA_TITLE_REQUIRED_MESSAGE>")`
-     - if `len(title) > 100`: raise `HTTPException(422, "<JIRA_TITLE_TOO_LONG_MESSAGE>")`
-     - return `title`
-   - Note: message strings must match Jira/AC exactly; do not invent them. Use placeholders until the exact strings are available.
-2. **Use the helper in `create_task()`** in `backend/main.py` instead of inline `.strip()` logic.
-3. **Update tests** in `tests/test_api.py`:
-   - Add `test_title_too_long_rejected()` that posts a 200-character string and asserts:
-     - status code 422
-     - JSON `detail` equals `<JIRA_TITLE_TOO_LONG_MESSAGE>` (exact match)
-   - Add `test_title_max_length_allowed()` that posts exactly 100 characters and asserts:
-     - status code 201
-     - returned title equals the submitted (trim rules still apply).
-   - Keep/strengthen `test_blank_title_rejected()` verifying 422 for whitespace-only title and assert `detail == <JIRA_TITLE_REQUIRED_MESSAGE>` (exact match).
+## 3. Sequence and dependencies
 
-**Mapping to acceptance criteria**
-- AC1 (200 chars rejected with explicit message): negative test asserts status/detail using Jira exact string.
-- AC2 (100 chars accepted): boundary test asserts 201 and exact title.
-- AC3 (blank title still rejected with same message): preserved and asserted via exact Jira string.
+Work on **one feature branch** with **one commit per story**, in this order:
 
-**Effort:** S (simple validation + tests)
+1. KAN-2: created_at migration. It changes every task response, so it goes first.
+2. KAN-3: title validation. It creates the shared helper that edit reuses.
+3. KAN-4: edit title. It depends on KAN-3.
+4. KAN-5: filter and clear. It is independent and additive.
 
----
+## 4. Data changes
 
-### Story KAN-4 — Edit task title (API + UI) using existing list view and shared validation rules
+- New column `tasks.created_at TEXT` (ISO-8601 UTC string).
+- The migration checks `PRAGMA table_info(tasks)` before altering, adds the column without a default, and backfills existing rows in the same run. Running it again changes nothing.
+- No table is dropped or recreated, so existing data stays valid. The new response field is additive.
 
-**Objective**
-Allow updating a task’s title via API and provide an edit interaction in the UI; reuse title validation from KAN-3. Add API and E2E tests for update success/404/422.
+## 5. Test strategy
 
-**Files to change / create (real paths)**
-- Change: `backend/main.py`
-- Change: `frontend/app.js`
-- Change: `tests/test_api.py`
-- Change/Add (if present in repo): Playwright tests under a conventional path (e.g., `e2e/` or `tests/e2e/`), following existing repo conventions.
-
-**Implementation steps (ordered)**
-1. **Backend: add update endpoint** in `backend/main.py`:
-   - Add route: `@app.patch("/api/tasks/{task_id}")`
-   - Request body: reuse `TaskIn` for `{ "title": ... }` (consistent schema).
-   - Validate title via shared `validate_title()` from KAN-3 (ensures the same exact Jira error messages).
-   - Execute SQL:
-     - `UPDATE tasks SET title = ? WHERE id = ?`
-     - if `rowcount == 0`: raise 404 with Jira/AC exact message: `<JIRA_TASK_NOT_FOUND_MESSAGE>`
-     - select updated row and return via `row_to_dict()`.
-2. **Frontend: implement edit control** in `frontend/app.js` without modifying `frontend/index.html`:
-   - In `render(tasks)`, for each task:
-     - Add an “Edit” button next to “Delete” (created dynamically, so no HTML change needed).
-     - On click, replace the title display with an `<input>` prefilled with current title plus Save/Cancel controls (all created dynamically).
-     - On Save:
-       - call `PATCH /api/tasks/{id}` with `{ "title": newTitle }`
-       - then reload via existing `act()`/`load()` pattern.
-     - On Cancel: revert by calling `load()` (or revert DOM locally).
-   - Ensure validation/errors surface via existing error handling (e.g., `errorEl` in `act()`).
-3. **Tests**
-   - **API tests** in `tests/test_api.py`:
-     - `test_edit_title_success()`:
-       - create a task
-       - PATCH `/api/tasks/{id}` with updated title
-       - assert 200 and title updated
-     - `test_edit_title_404()`:
-       - PATCH `/api/tasks/9999` returns 404 with `detail == <JIRA_TASK_NOT_FOUND_MESSAGE>` (exact match)
-     - `test_edit_title_too_long_rejected()`:
-       - create a task
-       - PATCH with 200 chars returns 422 with `detail == <JIRA_TITLE_TOO_LONG_MESSAGE>` (exact match)
-   - **Playwright E2E test(s)**:
-     - Verify user can enter edit mode, change title, save, and observe updated title rendered.
-     - Verify invalid edit (too-long title) shows error surfaced in the UI consistent with API response.
-
-**Mapping to acceptance criteria**
-- AC1 (PATCH updates title): covered by API endpoint + API test + E2E edit flow.
-- AC2 (PATCH missing id returns 404): covered by API test asserting exact Jira message.
-- AC3 (UI sends PATCH and shows updated title): covered by E2E test.
-- AC4 (PATCH enforces max length with exact message): covered by shared validation + API test + E2E error assertion.
-
-**Effort:** M (backend + UI behavior + API tests + E2E)
-
----
-
-### Story KAN-5 — Add filtering (all/active/completed) and clear completed tasks (API + UI)
-
-**Objective**
-Support filtering tasks by completion state and clearing all completed tasks, both in API and UI, including an explicit 422 for invalid filter values.
-
-**Files to change / create (real paths)**
-- Change: `backend/main.py`
-- Change: `frontend/app.js`
-- Change: `tests/test_api.py`
-- Change/Add (if present in repo): Playwright tests under a conventional path (e.g., `e2e/` or `tests/e2e/`), following existing repo conventions.
-
-**Implementation steps (ordered)**
-1. **Backend: extend list endpoint with query param** in `backend/main.py`:
-   - Update `list_tasks()` signature to accept query param, e.g. `filter: str = "all"`.
-   - Validate allowed values: `all`, `active`, `completed`.
-     - If invalid, return HTTP 422 (explicitly required). Error message should be stable and (if defined by Jira/AC) must match exactly; otherwise use a placeholder: `<JIRA_INVALID_FILTER_MESSAGE>`.
-   - SQL selection:
-     - `all`: `SELECT * FROM tasks ORDER BY id`
-     - `active`: `SELECT * FROM tasks WHERE completed = 0 ORDER BY id`
-     - `completed`: `SELECT * FROM tasks WHERE completed = 1 ORDER BY id`
-2. **Backend: add clear-completed endpoint** in `backend/main.py`:
-   - `@app.delete("/api/tasks/completed", status_code=204)`
-   - Execute `DELETE FROM tasks WHERE completed = 1`
-   - Always return 204 (even if 0 rows deleted) to keep it idempotent.
-3. **Frontend: add filter controls + clear completed** in `frontend/app.js` without editing HTML:
-   - Create a control bar dynamically at runtime and insert it relative to existing elements (e.g., above the task list).
-     - Controls: All / Active / Completed selector or buttons
-     - “Clear completed” button
-   - Maintain UI state variable: `let currentFilter = "all";`
-   - Update `load()` to call `GET /api/tasks?filter=${currentFilter}` (or omit param for `all` if preferred).
-   - Wire filter controls to set `currentFilter` and call `load()`.
-   - Wire clear-completed button to call `DELETE /api/tasks/completed` via existing `act()` helper and then reload.
-4. **Tests**
-   - **API tests** in `tests/test_api.py`:
-     - Filter tests:
-       - Create tasks and toggle some completed.
-       - `GET /api/tasks?filter=active` returns only `completed == False`
-       - `GET /api/tasks?filter=completed` returns only `completed == True`
-     - Invalid filter test:
-       - `GET /api/tasks?filter=bogus` returns 422 and (if specified) exact `detail` message, else `<JIRA_INVALID_FILTER_MESSAGE>`.
-     - Clear completed test:
-       - `DELETE /api/tasks/completed` returns 204
-       - subsequent `GET /api/tasks?filter=completed` returns `[]`
-   - **Playwright E2E test(s)**:
-     - Verify filter UI switches list between all/active/completed and reflects correct items.
-     - Verify “Clear completed” removes completed tasks from list and completed filter becomes empty.
-
-**Mapping to acceptance criteria**
-- AC1/AC2 (filter active/completed): covered by API tests + E2E filter behavior.
-- AC3 (clear completed 204 and completed becomes empty): covered by API tests + E2E clear-completed behavior.
-- AC4 (UI filter + clear completed): covered by E2E tests.
-- Explicit requirement: invalid filter returns 422: covered by API validation + API test.
-
-**Effort:** M (backend + UI controls + API tests + E2E)
-
----
-
-## 3. Sequence and dependencies (recommended order; one commit per story)
-
-**Recommended implementation order (minimize rework / shared logic)**
-1. **KAN-2** (created_at + idempotent migration)  
-   Reason: establishes schema evolution pattern early; affects row mapping and task creation response shape.
-2. **KAN-3** (title max-length validation + tests)  
-   Reason: creates shared validation used by edit.
-3. **KAN-4** (edit title API + UI + tests)  
-   Depends on KAN-3 validation helper and exact Jira messages.
-4. **KAN-5** (filter + clear completed API + UI + tests)  
-   Independent of title validation; adds query param validation and UI controls.
-
----
-
-## 4. Data changes (what changes, and how existing data stays valid)
-
-**Schema change**
-- Add column: `tasks.created_at` (`TEXT`, ISO-8601 timestamp string created by `datetime.now(timezone.utc).isoformat()`).
-
-**Migration approach (idempotent)**
-- On startup in `init_db()` (`backend/main.py`):
-  - Ensure `tasks` table exists.
-  - Check existing columns via `PRAGMA table_info(tasks)`.
-  - If `created_at` missing: `ALTER TABLE tasks ADD COLUMN created_at TEXT`.
-  - Backfill existing rows with a non-empty timestamp where `created_at IS NULL`.
-
-**Backward compatibility**
-- Existing DB files remain usable; no drops/recreates.
-- API responses include an additional field `created_at` (additive).
-- Existing endpoints preserved; changes are additive (new field, new query param, new PATCH and DELETE endpoints).
-
----
-
-## 5. Test strategy (API + Playwright E2E)
-
-**API tests (pytest + FastAPI TestClient)**
-- Location: `tests/test_api.py`
-
-Planned API tests by story:
-- **KAN-2**
-  - Old-schema DB migration + backfill:
-    - Start from a DB that has a `tasks` table without `created_at`, with at least one pre-existing row.
-    - Run `init_db()` and assert `created_at` column exists and pre-existing rows have non-empty backfilled values.
-  - API response includes `created_at`:
-    - Create a new task via POST and assert response includes non-empty `created_at`.
-    - List/get tasks and assert each has non-empty `created_at`.
-  - Second-run idempotency:
-    - Call `init_db()` a second time and assert no exception and API remains functional.
-- **KAN-3**
-  - Blank/whitespace title rejected with 422 and exact Jira message: `<JIRA_TITLE_REQUIRED_MESSAGE>`.
-  - Title > 100 chars rejected with 422 and exact Jira message: `<JIRA_TITLE_TOO_LONG_MESSAGE>`.
-  - Title of exactly 100 chars accepted (201) and echoed correctly.
-- **KAN-4**
-  - PATCH updates title successfully (200, updated title returned).
-  - PATCH unknown id returns 404 with exact Jira message: `<JIRA_TASK_NOT_FOUND_MESSAGE>`.
-  - PATCH too-long title returns 422 with exact Jira message: `<JIRA_TITLE_TOO_LONG_MESSAGE>`.
-- **KAN-5**
-  - Filter `active` returns only incomplete tasks.
-  - Filter `completed` returns only completed tasks.
-  - Invalid filter returns 422 (and exact Jira message if provided): `<JIRA_INVALID_FILTER_MESSAGE>`.
-  - Clear completed returns 204 and subsequent completed-filter list is empty.
-
-**Playwright E2E tests (UI acceptance criteria)**
-- Purpose: validate UI flows for acceptance criteria that depend on `frontend/app.js` behavior.
-- Planned E2E coverage:
-  - **KAN-3 (UI creation validation)**
-    - Attempt to add a task with a title longer than 100 characters and assert the UI displays the API error message (exact Jira message placeholder: `<JIRA_TITLE_TOO_LONG_MESSAGE>`).
-  - **KAN-4 (Edit UI)**
-    - Edit an existing task title, save, and assert the list updates to the new title.
-    - Attempt to save an invalid (too-long) title and assert error is displayed.
-  - **KAN-5 (Filter + clear completed UI)**
-    - Toggle completion and verify filter controls correctly show All/Active/Completed subsets.
-    - Clear completed and verify completed tasks are removed and completed-filter view is empty.
-
----
+- **pytest (`tests/test_api.py`):** API behaviour and the migration upgrade test, as listed per story.
+- **Playwright end-to-end (QA phase, after the code is merged):** one spec file per story under `tests/e2e/`, with Gherkin `.feature` files under `tests/features/`. They cover every UI acceptance criterion: the 100-character maxlength and client-side error (KAN-3), inline edit (KAN-4), filter controls and Clear completed (KAN-5). Tests use the `data-testid` hooks from the LLD, start the app on a separate port with a temporary database through `TODO_DB_PATH`, and produce an HTML report.
+- UI behaviour is not verified manually only.
 
 ## 6. Risks and mitigations
 
-1. **Risk: SQLite ALTER TABLE + backfill could behave unexpectedly across existing DB states**
-   - Mitigation: use `PRAGMA table_info(tasks)` to detect column presence; only ALTER when absent; backfill only when `created_at IS NULL`.
-
-2. **Risk: `row_to_dict()` assumes created_at exists and could KeyError if migration didn’t run**
-   - Mitigation: ensure `init_db()` runs before serving requests and that migration logic runs after table creation and before any selects/inserts rely on `created_at`.
-
-3. **Risk: UI changes require DOM elements that may not exist in `frontend/index.html`**
-   - Mitigation: create edit/filter/clear-completed controls dynamically in `frontend/app.js` and insert relative to existing, already-referenced elements. Do not add required static HTML.
-
-4. **Risk: Tight coupling between validation messages and tests**
-   - Mitigation: centralize validation in `validate_title()` and define message strings in a single place. Use placeholders until exact Jira strings are confirmed; once confirmed, update both backend and tests to match exactly.
-
----
+- **Route shadowing:** `/api/tasks/completed` can be captured by `/api/tasks/{task_id}`. Declare it first and test it.
+- **Existing rows without created_at:** adding the column leaves NULLs. Backfill in the same migration and test the upgrade path.
+- **Import-time `init_db()`:** it runs when the module is imported, which makes startup tests awkward. Test `migrate_sqlite_schema` directly on a temporary database, and keep `init_db()` callable.
+- **Limit mismatch:** the input currently allows 200 characters while the API limit is 100. Change `maxlength` to 100 in KAN-3 and use one constant or helper.
+- **Message coupling between code and tests:** keep each message in one place and assert it exactly.
+- **Missing test hooks:** the LLD must name a `data-testid` for every new control, or Playwright tests will depend on styling.
 
 ## 7. Branching and commits
 
-**Branch name**
-- `feature/KAN-1-todo-enhancements`
-
-**Commit order (one per story)**
-1. `KAN-2: add created_at and idempotent migration`
-2. `KAN-3: enforce max title length validation`
-3. `KAN-4: add edit title API and UI`
-4. `KAN-5: add filtering and clear completed`
-
----
+- Branch: `feature/KAN-1-task-lifecycle-ux` (one branch for the epic).
+- Commits, in order:
+  - `KAN-2: add created_at and idempotent migration`
+  - `KAN-3: enforce 100-char title limit in backend and frontend`
+  - `KAN-4: add edit task title API and UI`
+  - `KAN-5: add filtering and clear completed`
 
 ## 8. Definition of done
 
-- All acceptance criteria for KAN-2, KAN-3, KAN-4, KAN-5 are implemented and verifiable via automated tests.
-- API tests are green (pytest).
-- Playwright E2E tests are green for UI acceptance criteria (KAN-3, KAN-4, KAN-5).
-- No changes made to `frontend/index.html` (explicitly respected).
-- API remains backward compatible (existing endpoints preserved; additive fields/params only).
-- Code changes limited to repo paths:
-  - `backend/main.py`, `frontend/app.js`, `tests/test_api.py` (plus Playwright tests in the repo’s existing E2E test location, if present).
-
-DRAFT READY - AWAITING APPROVAL
+- All acceptance criteria of KAN-2 to KAN-5 are met as written in Jira.
+- pytest passes, including the migration upgrade test; Playwright tests pass and an HTML report is produced.
+- Existing endpoints and rows keep working; new parameters are optional.
+- The 100-character limit and its messages are identical in backend, frontend and tests.
+- `DELETE /api/tasks/completed` works (route order verified).
+- Build script produces a deployable artefact; README and documentation are updated; Jira stories are moved to Done.
