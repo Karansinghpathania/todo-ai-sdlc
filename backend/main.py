@@ -1,12 +1,14 @@
 """Baseline Todo app: add, list, complete (toggle), delete."""
 import os
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from backend.migrations import migrate_sqlite_schema
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = os.environ.get("TODO_DB_PATH", str(BASE_DIR / "todo.db"))
@@ -30,6 +32,7 @@ def init_db() -> None:
                 completed INTEGER NOT NULL DEFAULT 0
             )"""
         )
+        migrate_sqlite_schema(conn)
 
 
 init_db()
@@ -40,7 +43,12 @@ class TaskIn(BaseModel):
 
 
 def row_to_dict(row: sqlite3.Row) -> dict:
-    return {"id": row["id"], "title": row["title"], "completed": bool(row["completed"])}
+    return {
+        "id": row["id"],
+        "title": row["title"],
+        "completed": bool(row["completed"]),
+        "created_at": row["created_at"],
+    }
 
 
 @app.get("/api/tasks")
@@ -55,8 +63,11 @@ def create_task(task: TaskIn):
     title = task.title.strip()
     if not title:
         raise HTTPException(status_code=422, detail="Title is required")
+    created_at = datetime.now(timezone.utc).isoformat()
     with get_conn() as conn:
-        cur = conn.execute("INSERT INTO tasks (title) VALUES (?)", (title,))
+        cur = conn.execute(
+            "INSERT INTO tasks (title, created_at) VALUES (?, ?)", (title, created_at)
+        )
         row = conn.execute("SELECT * FROM tasks WHERE id = ?", (cur.lastrowid,)).fetchone()
     return row_to_dict(row)
 
