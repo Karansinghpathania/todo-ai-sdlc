@@ -122,3 +122,5 @@ Work on **one feature branch** with **one commit per story**, in this order:
 - The 100-character limit and its messages are identical in backend, frontend and tests.
 - `DELETE /api/tasks/completed` works (route order verified).
 - Build script produces a deployable artefact; README and documentation are updated; Jira stories are moved to Done.
+
+DRAFT READY - AWAITING APPROVAL
