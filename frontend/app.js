@@ -2,6 +2,9 @@ const listEl = document.getElementById("task-list");
 const inputEl = document.getElementById("title-input");
 const addBtn = document.getElementById("add-btn");
 const errorEl = document.getElementById("error");
+inputEl.setAttribute("data-testid", "title-input");
+addBtn.setAttribute("data-testid", "add-btn");
+errorEl.setAttribute("data-testid", "error-banner");
 
 async function api(path, options) {
   const res = await fetch(path, options);
@@ -51,6 +54,7 @@ async function act(fn) {
 addBtn.addEventListener("click", () => {
   const title = inputEl.value.trim();
   if (!title) { errorEl.textContent = "Please enter a task title"; return; }
+  if (title.length > 100) { errorEl.textContent = "Title must be 100 characters or less"; return; }
   act(async () => {
     await api("/api/tasks", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title }) });
     inputEl.value = "";

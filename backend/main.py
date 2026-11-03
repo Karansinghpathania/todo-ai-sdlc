@@ -51,6 +51,15 @@ def row_to_dict(row: sqlite3.Row) -> dict:
     }
 
 
+def normalize_and_validate_title(raw: str) -> str:
+    title = raw.strip()
+    if not title:
+        raise HTTPException(status_code=422, detail="Title is required")
+    if len(title) > 100:
+        raise HTTPException(status_code=422, detail="Title must be 100 characters or less")
+    return title
+
+
 @app.get("/api/tasks")
 def list_tasks():
     with get_conn() as conn:
@@ -60,9 +69,7 @@ def list_tasks():
 
 @app.post("/api/tasks", status_code=201)
 def create_task(task: TaskIn):
-    title = task.title.strip()
-    if not title:
-        raise HTTPException(status_code=422, detail="Title is required")
+    title = normalize_and_validate_title(task.title)
     created_at = datetime.now(timezone.utc).isoformat()
     with get_conn() as conn:
         cur = conn.execute(

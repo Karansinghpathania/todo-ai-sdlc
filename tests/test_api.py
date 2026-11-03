@@ -2,12 +2,15 @@ import os
 import tempfile
 import sqlite3
 from datetime import datetime, timedelta
+import pytest
 
 os.environ["TODO_DB_PATH"] = os.path.join(tempfile.mkdtemp(), "test.db")
 
 from fastapi.testclient import TestClient  # noqa: E402
+from fastapi import HTTPException  # noqa: E402
 from backend.main import app  # noqa: E402
 from backend.main import init_db  # noqa: E402
+from backend.main import normalize_and_validate_title  # noqa: E402
 from backend.migrations import migrate_sqlite_schema  # noqa: E402
 
 client = TestClient(app)
@@ -215,3 +218,59 @@ def test_init_db_can_run_again_without_losing_data():
     assert found[0]["title"] == "Survives restart"
     assert found[0]["created_at"] == stamp
     assert client.delete(f"/api/tasks/{task_id}").status_code == 204
+
+
+def test_create_title_101_chars_rejected():
+    r = client.post("/api/tasks", json={"title": "a" * 101})
+    assert r.status_code == 422
+    assert r.json() == {"detail": "Title must be 100 characters or less"}
+    assert all(t["title"] != "a" * 101 for t in client.get("/api/tasks").json())
+
+
+def test_create_title_100_chars_accepted():
+    r = client.post("/api/tasks", json={"title": "a" * 100})
+    assert r.status_code == 201
+    task = r.json()
+    assert task["title"] == "a" * 100 and task["completed"] is False
+    assert client.delete(f"/api/tasks/{task['id']}").status_code == 204
+
+
+def test_create_title_length_is_checked_after_trimming():
+    r = client.post("/api/tasks", json={"title": "  " + "a" * 100 + "  "})
+    assert r.status_code == 201 and r.json()["title"] == "a" * 100
+    assert client.delete(f"/api/tasks/{r.json()['id']}").status_code == 204
+
+    r = client.post("/api/tasks", json={"title": "  " + "a" * 101 + "  "})
+    assert r.status_code == 422
+    assert r.json() == {"detail": "Title must be 100 characters or less"}
+
+
+def test_blank_title_rejected_with_message():
+    r = client.post("/api/tasks", json={"title": "   "})
+    assert r.status_code == 422 and r.json() == {"detail": "Title is required"}
+
+
+def test_normalize_and_validate_title_helper():
+    assert normalize_and_validate_title("  hello  ") == "hello"
+    assert normalize_and_validate_title("a" * 100) == "a" * 100
+    with pytest.raises(HTTPException) as blank:
+        normalize_and_validate_title("   ")
+    assert blank.value.status_code == 422
+    assert blank.value.detail == "Title is required"
+    with pytest.raises(HTTPException) as too_long:
+        normalize_and_validate_title("a" * 101)
+    assert too_long.value.status_code == 422
+    assert too_long.value.detail == "Title must be 100 characters or less"
+
+
+def test_frontend_enforces_title_limit():
+    page = client.get("/")
+    assert page.status_code == 200
+    assert 'maxlength="100"' in page.text and 'maxlength="200"' not in page.text
+    js = client.get("/static/app.js").text
+    assert js.count("Title must be 100 characters or less") == 1
+    assert "if (title.length > 100)" in js
+    assert js.index("if (title.length > 100)") < js.index('method: "POST"')
+    assert 'inputEl.setAttribute("data-testid", "title-input");' in js
+    assert 'addBtn.setAttribute("data-testid", "add-btn");' in js
+    assert 'errorEl.setAttribute("data-testid", "error-banner");' in js
