@@ -99,6 +99,82 @@ def test_migration_backfill_uses_one_timestamp():
     conn.close()
 
 
+def test_migration_repairs_missing_timestamps_without_changing_valid_rows():
+    original_stamp = "2024-01-01T12:00:00+00:00"
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute(
+            "CREATE TABLE tasks (id INTEGER PRIMARY KEY, title TEXT NOT NULL, "
+            "completed INTEGER NOT NULL DEFAULT 0, created_at TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO tasks (id, title, completed, created_at) VALUES (?, ?, ?, ?)",
+            [
+                (1, "Null timestamp", 0, None),
+                (2, "Empty timestamp", 1, ""),
+                (3, "Valid timestamp", 1, original_stamp),
+            ],
+        )
+        conn.commit()
+
+        migrate_sqlite_schema(conn)
+        conn.commit()
+        rows = conn.execute(
+            "SELECT id, title, completed, created_at FROM tasks ORDER BY id"
+        ).fetchall()
+        stamp = rows[0][3]
+        assert isinstance(stamp, str) and stamp != ""
+        assert datetime.fromisoformat(stamp).utcoffset() == timedelta(0)
+        assert rows == [
+            (1, "Null timestamp", 0, stamp),
+            (2, "Empty timestamp", 1, stamp),
+            (3, "Valid timestamp", 1, original_stamp),
+        ]
+
+        migrate_sqlite_schema(conn)
+        conn.commit()
+        assert conn.execute(
+            "SELECT id, title, completed, created_at FROM tasks ORDER BY id"
+        ).fetchall() == rows
+    finally:
+        conn.close()
+
+
+def test_init_db_repairs_empty_timestamp_and_returns_it_in_api(tmp_path, monkeypatch):
+    from backend import main
+
+    db_path = tmp_path / "repair.db"
+    monkeypatch.setattr(main, "DB_PATH", str(db_path))
+    init_db()
+    conn = sqlite3.connect(db_path)
+    try:
+        with conn:
+            conn.execute(
+                "INSERT INTO tasks (title, completed, created_at) VALUES (?, ?, ?)",
+                ("Needs timestamp", 1, ""),
+            )
+    finally:
+        conn.close()
+
+    init_db()
+    response = client.get("/api/tasks")
+    assert response.status_code == 200
+    tasks = response.json()
+    assert len(tasks) == 1
+    task = tasks[0]
+    assert task["title"] == "Needs timestamp"
+    assert task["completed"] is True
+    assert datetime.fromisoformat(task["created_at"]).utcoffset() == timedelta(0)
+
+    init_db()
+    assert client.get("/api/tasks").json() == tasks
+    conn = sqlite3.connect(db_path)
+    try:
+        assert conn.execute("SELECT created_at FROM tasks").fetchone()[0] == task["created_at"]
+    finally:
+        conn.close()
+
+
 def test_create_task_stores_and_returns_created_at():
     r = client.post("/api/tasks", json={"title": "Stamp me"})
     assert r.status_code == 201

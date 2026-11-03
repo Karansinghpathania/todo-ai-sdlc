@@ -8,4 +8,7 @@ def migrate_sqlite_schema(conn: sqlite3.Connection) -> None:
     if "created_at" not in cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN created_at TEXT")
     ts = datetime.now(timezone.utc).isoformat()
-    conn.execute("UPDATE tasks SET created_at = ? WHERE created_at IS NULL", (ts,))
+    conn.execute(
+        "UPDATE tasks SET created_at = ? WHERE created_at IS NULL OR created_at = ''",
+        (ts,),
+    )
