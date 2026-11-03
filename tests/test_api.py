@@ -274,3 +274,85 @@ def test_frontend_enforces_title_limit():
     assert 'inputEl.setAttribute("data-testid", "title-input");' in js
     assert 'addBtn.setAttribute("data-testid", "add-btn");' in js
     assert 'errorEl.setAttribute("data-testid", "error-banner");' in js
+
+
+def create_task_via_api(title: str) -> dict:
+    r = client.post("/api/tasks", json={"title": title})
+    assert r.status_code == 201
+    return r.json()
+
+
+def test_edit_task_title_success():
+    task = create_task_via_api("Buy mikl")
+    r = client.patch(f"/api/tasks/{task['id']}", json={"title": "Buy milk"})
+    assert r.status_code == 200
+    assert r.json()["id"] == task["id"] and r.json()["title"] == "Buy milk"
+    found = next(t for t in client.get("/api/tasks").json() if t["id"] == task["id"])
+    assert found["title"] == "Buy milk"
+    assert client.delete(f"/api/tasks/{task['id']}").status_code == 204
+
+
+def test_edit_task_title_is_trimmed():
+    task = create_task_via_api("Before trim")
+    r = client.patch(f"/api/tasks/{task['id']}", json={"title": "  After trim  "})
+    assert r.status_code == 200 and r.json()["title"] == "After trim"
+    assert client.delete(f"/api/tasks/{task['id']}").status_code == 204
+
+
+def test_edit_missing_task_returns_404():
+    r = client.patch("/api/tasks/9999", json={"title": "Anything"})
+    assert r.status_code == 404 and r.json() == {"detail": "Task not found"}
+
+
+def test_edit_title_101_chars_rejected():
+    task = create_task_via_api("Original title")
+    r = client.patch(f"/api/tasks/{task['id']}", json={"title": "  " + "a" * 101 + "  "})
+    assert r.status_code == 422
+    assert r.json() == {"detail": "Title must be 100 characters or less"}
+    found = next(t for t in client.get("/api/tasks").json() if t["id"] == task["id"])
+    assert found["title"] == "Original title"
+    assert client.delete(f"/api/tasks/{task['id']}").status_code == 204
+
+
+def test_edit_title_100_chars_accepted():
+    task = create_task_via_api("Short title")
+    r = client.patch(f"/api/tasks/{task['id']}", json={"title": "a" * 100})
+    assert r.status_code == 200 and r.json()["title"] == "a" * 100
+    assert client.delete(f"/api/tasks/{task['id']}").status_code == 204
+
+
+def test_edit_blank_title_rejected():
+    task = create_task_via_api("Keep me")
+    r = client.patch(f"/api/tasks/{task['id']}", json={"title": "   "})
+    assert r.status_code == 422 and r.json() == {"detail": "Title is required"}
+    found = next(t for t in client.get("/api/tasks").json() if t["id"] == task["id"])
+    assert found["title"] == "Keep me"
+    assert client.delete(f"/api/tasks/{task['id']}").status_code == 204
+
+
+def test_edit_keeps_completed_and_created_at():
+    task = create_task_via_api("Keep fields")
+    toggled = client.patch(f"/api/tasks/{task['id']}/toggle")
+    assert toggled.status_code == 200 and toggled.json()["completed"] is True
+    r = client.patch(f"/api/tasks/{task['id']}", json={"title": "Kept fields"})
+    assert r.status_code == 200 and r.json()["title"] == "Kept fields"
+    assert r.json()["completed"] is True
+    assert r.json()["created_at"] == task["created_at"]
+    assert client.delete(f"/api/tasks/{task['id']}").status_code == 204
+
+
+def test_frontend_inline_edit():
+    js = client.get("/static/app.js").text
+    assert 'const TITLE_TOO_LONG = "Title must be 100 characters or less";' in js
+    assert js.count("Title must be 100 characters or less") == 1
+    assert js.count("errorEl.textContent = TITLE_TOO_LONG;") == 2
+    assert js.count("if (title.length > 100)") == 2
+    assert js.count("Please enter a task title") == 2
+    assert "editInput.maxLength = 100;" in js
+    assert 'cb.setAttribute("data-testid", `toggle-task-${t.id}`);' in js
+    assert 'span.setAttribute("data-testid", `task-title-${t.id}`);' in js
+    assert 'del.setAttribute("data-testid", `delete-task-${t.id}`);' in js
+    assert 'span.addEventListener("click", () => startEdit(t, span));' in js
+    save_src = js[js.index("function saveEdit"):js.index("async function load()")]
+    assert save_src.index("if (title.length > 100)") < save_src.index('method: "PATCH"')
+    assert save_src.index("if (!title)") < save_src.index('method: "PATCH"')
