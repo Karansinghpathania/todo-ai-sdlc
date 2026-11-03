@@ -54,11 +54,13 @@
 - **Ordered implementation steps:**
   1. **Create `backend/migrations.py`** with a function (e.g., `run_migrations(conn: sqlite3.Connection) -> None`) that:
      - runs `PRAGMA table_info(tasks)` and detects if `created_at` exists.
-     - if missing:
-       - executes `ALTER TABLE tasks ADD COLUMN created_at TEXT`
-       - backfills existing rows: `UPDATE tasks SET created_at = ? WHERE created_at IS NULL OR created_at = ''`
-         - value: `datetime.now(timezone.utc).isoformat()`
-     - does nothing if column already exists (idempotent).
+     - if missing, executes `ALTER TABLE tasks ADD COLUMN created_at TEXT`.
+     - On every startup, backfills missing or empty timestamps:
+       `UPDATE tasks SET created_at = ? WHERE created_at IS NULL OR created_at = ''`
+       - value: one `datetime.now(timezone.utc).isoformat()` timestamp per run.
+     - Preserves non-empty timestamps, task IDs, titles, and completion state.
+     - Repeated runs leave repaired rows unchanged (idempotent).
+     - Backfilled timestamps represent the repair time, not the unknown original creation time.
   2. **Update `init_db()` in `backend/main.py`:**
      - keep `CREATE TABLE IF NOT EXISTS ...` as-is (but it will need `created_at` for fresh DBs). Because existing DBs might already exist, do:
        - Create table with the **new schema** if it doesn’t exist (include `created_at TEXT` but no default).
@@ -72,10 +74,12 @@
   5. **Tests (`tests/test_api.py`):**
      - Extend `test_add_toggle_delete()` (or add new tests) to assert created task JSON includes a non-empty `"created_at"`.
      - Add an idempotency test by calling `backend.main.init_db()` a second time (or importing app in a way that triggers it) and verifying no exception occurs and subsequent calls still work.
+     - Test a mixed existing schema with NULL, empty, and valid timestamps: repair only missing values using one UTC timestamp and preserve all other task data across repeated runs.
+     - Verify startup repairs an empty timestamp in a persisted database and the API returns the repaired value unchanged on subsequent startups.
 
 - **Mapping to acceptance criteria (KAN-2):**
   - AC1 (update schema without dropping data): covered by `PRAGMA table_info` check + `ALTER TABLE` + no destructive actions.
-  - AC2 (idempotent on subsequent starts): covered by “column exists => no-op” branch + test that reruns migration/init.
+  - AC2 (idempotent on subsequent starts): covered by skipping an existing column, preserving populated timestamps, and tests that rerun migration/init.
   - AC3 (created_at included in returned tasks): covered by explicit insert + `row_to_dict()` + tests.
 
 - **Effort:** **M** (SQLite migration + careful startup behavior)
@@ -218,7 +222,8 @@ Per binding design notes, recommended implementation order is:
   - On startup, query `PRAGMA table_info(tasks)` to determine whether `created_at` exists.
   - If missing:
     - `ALTER TABLE tasks ADD COLUMN created_at TEXT` (no default; SQLite constraint)
-    - Backfill existing rows within the same migration run to a UTC ISO string using `datetime.now(timezone.utc).isoformat()`.
+  - On every startup, backfill NULL or empty timestamps to one UTC ISO string using `datetime.now(timezone.utc).isoformat()`, even if the column already exists.
+  - Preserve non-empty timestamps; a backfilled value records repair time rather than historical creation time.
 - **Existing data validity:**
   - No rows are dropped or rewritten beyond adding/backfilling `created_at`.
   - Existing tasks keep `id`, `title`, `completed` unchanged.

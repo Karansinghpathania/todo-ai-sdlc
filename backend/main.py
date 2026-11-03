@@ -1,12 +1,14 @@
 """Baseline Todo app: add, list, complete (toggle), delete."""
 import os
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from backend.migrations import migrate_sqlite_schema
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = os.environ.get("TODO_DB_PATH", str(BASE_DIR / "todo.db"))
@@ -30,6 +32,7 @@ def init_db() -> None:
                 completed INTEGER NOT NULL DEFAULT 0
             )"""
         )
+        migrate_sqlite_schema(conn)
 
 
 init_db()
@@ -40,23 +43,49 @@ class TaskIn(BaseModel):
 
 
 def row_to_dict(row: sqlite3.Row) -> dict:
-    return {"id": row["id"], "title": row["title"], "completed": bool(row["completed"])}
+    return {
+        "id": row["id"],
+        "title": row["title"],
+        "completed": bool(row["completed"]),
+        "created_at": row["created_at"],
+    }
+
+
+def normalize_and_validate_title(raw: str) -> str:
+    title = raw.strip()
+    if not title:
+        raise HTTPException(status_code=422, detail="Title is required")
+    if len(title) > 100:
+        raise HTTPException(status_code=422, detail="Title must be 100 characters or less")
+    return title
+
+
+LIST_QUERIES = {
+    "all": "SELECT * FROM tasks ORDER BY id",
+    "active": "SELECT * FROM tasks WHERE completed = 0 ORDER BY id",
+    "completed": "SELECT * FROM tasks WHERE completed = 1 ORDER BY id",
+}
 
 
 @app.get("/api/tasks")
-def list_tasks():
+def list_tasks(filter: str | None = None):
+    if filter is None:
+        filter = "all"
+    if filter not in LIST_QUERIES:
+        raise HTTPException(status_code=422, detail="Filter must be all, active or completed")
     with get_conn() as conn:
-        rows = conn.execute("SELECT * FROM tasks ORDER BY id").fetchall()
+        rows = conn.execute(LIST_QUERIES[filter]).fetchall()
     return [row_to_dict(r) for r in rows]
 
 
 @app.post("/api/tasks", status_code=201)
 def create_task(task: TaskIn):
-    title = task.title.strip()
-    if not title:
-        raise HTTPException(status_code=422, detail="Title is required")
+    title = normalize_and_validate_title(task.title)
+    created_at = datetime.now(timezone.utc).isoformat()
     with get_conn() as conn:
-        cur = conn.execute("INSERT INTO tasks (title) VALUES (?)", (title,))
+        cur = conn.execute(
+            "INSERT INTO tasks (title, created_at) VALUES (?, ?)", (title, created_at)
+        )
         row = conn.execute("SELECT * FROM tasks WHERE id = ?", (cur.lastrowid,)).fetchone()
     return row_to_dict(row)
 
@@ -71,6 +100,23 @@ def toggle_task(task_id: int):
             raise HTTPException(status_code=404, detail="Task not found")
         row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
     return row_to_dict(row)
+
+
+@app.patch("/api/tasks/{task_id}")
+def update_task_title(task_id: int, task: TaskIn):
+    title = normalize_and_validate_title(task.title)
+    with get_conn() as conn:
+        cur = conn.execute("UPDATE tasks SET title = ? WHERE id = ?", (title, task_id))
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Task not found")
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    return row_to_dict(row)
+
+
+@app.delete("/api/tasks/completed", status_code=204)
+def clear_completed():
+    with get_conn() as conn:
+        conn.execute("DELETE FROM tasks WHERE completed = 1")
 
 
 @app.delete("/api/tasks/{task_id}", status_code=204)
