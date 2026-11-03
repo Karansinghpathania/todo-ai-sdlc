@@ -60,10 +60,21 @@ def normalize_and_validate_title(raw: str) -> str:
     return title
 
 
+LIST_QUERIES = {
+    "all": "SELECT * FROM tasks ORDER BY id",
+    "active": "SELECT * FROM tasks WHERE completed = 0 ORDER BY id",
+    "completed": "SELECT * FROM tasks WHERE completed = 1 ORDER BY id",
+}
+
+
 @app.get("/api/tasks")
-def list_tasks():
+def list_tasks(filter: str | None = None):
+    if filter is None:
+        filter = "all"
+    if filter not in LIST_QUERIES:
+        raise HTTPException(status_code=422, detail="Filter must be all, active or completed")
     with get_conn() as conn:
-        rows = conn.execute("SELECT * FROM tasks ORDER BY id").fetchall()
+        rows = conn.execute(LIST_QUERIES[filter]).fetchall()
     return [row_to_dict(r) for r in rows]
 
 
@@ -100,6 +111,12 @@ def update_task_title(task_id: int, task: TaskIn):
             raise HTTPException(status_code=404, detail="Task not found")
         row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
     return row_to_dict(row)
+
+
+@app.delete("/api/tasks/completed", status_code=204)
+def clear_completed():
+    with get_conn() as conn:
+        conn.execute("DELETE FROM tasks WHERE completed = 1")
 
 
 @app.delete("/api/tasks/{task_id}", status_code=204)

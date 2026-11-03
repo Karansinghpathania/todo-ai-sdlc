@@ -74,7 +74,8 @@ function saveEdit(id, editInput) {
 }
 
 async function load() {
-  render(await api("/api/tasks"));
+  const path = currentFilter === "all" ? "/api/tasks" : `/api/tasks?filter=${currentFilter}`;
+  render(await api(path));
 }
 
 async function act(fn) {
@@ -92,5 +93,33 @@ addBtn.addEventListener("click", () => {
   });
 });
 inputEl.addEventListener("keydown", (e) => { if (e.key === "Enter") addBtn.click(); });
+
+let currentFilter = "all";
+const filterButtons = {};
+const filterBar = document.createElement("div");
+filterBar.className = "filter-bar";
+["all", "active", "completed"].forEach((name) => {
+  const btn = document.createElement("button");
+  btn.textContent = name.charAt(0).toUpperCase() + name.slice(1);
+  btn.className = "filter-btn";
+  btn.addEventListener("click", () => act(() => { currentFilter = name; updateFilterButtons(); }));
+  filterButtons[name] = btn;
+  filterBar.appendChild(btn);
+});
+const clearBtn = document.createElement("button");
+clearBtn.textContent = "Clear completed";
+clearBtn.className = "clear-completed-btn";
+clearBtn.addEventListener("click", () => act(() => api("/api/tasks/completed", { method: "DELETE" })));
+filterBar.appendChild(clearBtn);
+listEl.before(filterBar);
+
+function updateFilterButtons() {
+  Object.keys(filterButtons).forEach((name) => {
+    const selected = name === currentFilter;
+    filterButtons[name].setAttribute("aria-pressed", String(selected));
+    filterButtons[name].style.fontWeight = selected ? "bold" : "normal";
+  });
+}
+updateFilterButtons();
 
 load().catch((e) => { errorEl.textContent = e.message; });

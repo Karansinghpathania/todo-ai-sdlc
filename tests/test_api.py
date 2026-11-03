@@ -356,3 +356,100 @@ def test_frontend_inline_edit():
     save_src = js[js.index("function saveEdit"):js.index("async function load()")]
     assert save_src.index("if (title.length > 100)") < save_src.index('method: "PATCH"')
     assert save_src.index("if (!title)") < save_src.index('method: "PATCH"')
+
+
+def complete_task_via_api(task_id: int) -> None:
+    r = client.patch(f"/api/tasks/{task_id}/toggle")
+    assert r.status_code == 200 and r.json()["completed"] is True
+
+
+def test_filter_active_returns_only_incomplete_tasks():
+    open_task = create_task_via_api("Filter open")
+    done_task = create_task_via_api("Filter done")
+    complete_task_via_api(done_task["id"])
+    r = client.get("/api/tasks?filter=active")
+    assert r.status_code == 200
+    ids = [t["id"] for t in r.json()]
+    assert open_task["id"] in ids and done_task["id"] not in ids
+    assert all(t["completed"] is False for t in r.json())
+    assert client.delete(f"/api/tasks/{open_task['id']}").status_code == 204
+    assert client.delete(f"/api/tasks/{done_task['id']}").status_code == 204
+
+
+def test_filter_completed_returns_only_completed_tasks():
+    open_task = create_task_via_api("Filter open")
+    done_task = create_task_via_api("Filter done")
+    complete_task_via_api(done_task["id"])
+    r = client.get("/api/tasks?filter=completed")
+    assert r.status_code == 200
+    ids = [t["id"] for t in r.json()]
+    assert done_task["id"] in ids and open_task["id"] not in ids
+    assert all(t["completed"] is True for t in r.json())
+    assert client.delete(f"/api/tasks/{open_task['id']}").status_code == 204
+    assert client.delete(f"/api/tasks/{done_task['id']}").status_code == 204
+
+
+def test_filter_all_and_omitted_return_every_task():
+    open_task = create_task_via_api("All open")
+    done_task = create_task_via_api("All done")
+    complete_task_via_api(done_task["id"])
+    omitted = client.get("/api/tasks")
+    explicit = client.get("/api/tasks?filter=all")
+    assert omitted.status_code == 200 and explicit.status_code == 200
+    assert omitted.json() == explicit.json()
+    ids = [t["id"] for t in omitted.json()]
+    assert open_task["id"] in ids and done_task["id"] in ids
+    assert ids == sorted(ids)
+    assert client.delete(f"/api/tasks/{open_task['id']}").status_code == 204
+    assert client.delete(f"/api/tasks/{done_task['id']}").status_code == 204
+
+
+def test_filter_invalid_value_rejected():
+    for value in ("invalidvalue", "", "Active"):
+        r = client.get(f"/api/tasks?filter={value}")
+        assert r.status_code == 422
+        assert r.json() == {"detail": "Filter must be all, active or completed"}
+
+
+def test_clear_completed_removes_only_completed_tasks():
+    open_task = create_task_via_api("Clear open")
+    first_done = create_task_via_api("Clear done 1")
+    second_done = create_task_via_api("Clear done 2")
+    complete_task_via_api(first_done["id"])
+    complete_task_via_api(second_done["id"])
+    r = client.delete("/api/tasks/completed")
+    assert r.status_code == 204 and r.content == b""
+    assert client.get("/api/tasks?filter=completed").json() == []
+    ids = [t["id"] for t in client.get("/api/tasks").json()]
+    assert open_task["id"] in ids
+    assert first_done["id"] not in ids and second_done["id"] not in ids
+    assert client.delete(f"/api/tasks/{open_task['id']}").status_code == 204
+
+
+def test_clear_completed_route_is_not_parsed_as_task_id():
+    r = client.delete("/api/tasks/completed")
+    assert r.status_code == 204
+    task = create_task_via_api("Delete by id still works")
+    assert client.delete(f"/api/tasks/{task['id']}").status_code == 204
+    r = client.delete("/api/tasks/9999")
+    assert r.status_code == 404 and r.json() == {"detail": "Task not found"}
+    delete_paths = [
+        route.path for route in app.routes
+        if getattr(route, "methods", None) and "DELETE" in route.methods
+    ]
+    assert delete_paths.index("/api/tasks/completed") < delete_paths.index("/api/tasks/{task_id}")
+
+
+def test_frontend_filter_and_clear_controls():
+    js = client.get("/static/app.js").text
+    assert 'let currentFilter = "all";' in js
+    assert '["all", "active", "completed"].forEach((name) => {' in js
+    assert 'const path = currentFilter === "all" ? "/api/tasks" : `/api/tasks?filter=${currentFilter}`;' in js
+    assert "render(await api(path));" in js
+    assert "?filter=all" not in js
+    assert 'clearBtn.textContent = "Clear completed";' in js
+    assert 'clearBtn.addEventListener("click", () => act(() => api("/api/tasks/completed", { method: "DELETE" })));' in js
+    assert js.count("listEl.before(filterBar);") == 1
+    assert js.count("async function load()") == 1
+    render_src = js[js.index("function render(tasks)"):js.index("function startEdit")]
+    assert "filterBar" not in render_src and "clearBtn" not in render_src
